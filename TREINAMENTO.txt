@@ -1,0 +1,144 @@
+Software para treinamento.
+
+Objetivo: Criar um script/software que faça o treinamento da ScoreTable de forma rápida, sem a necessidade de fazer a simulação usando a plataforma.
+
+Requisitos: 
+- Sempre deve-se usar valores semelhantes à plataforma, para que no final os valores possam ser comparados.
+- Trabalhe com valores parametrizaveis de tamanho do sistema (x, y), número de estados (valor atual 35) e número de tipos de tarefas (valor atual 3). 
+- Não é necessário criar um "modelo" de aplicações. Bastam as tarefas e seus consumos médios.
+- Deve-se modelar um many-core em alto nível de abstração.
+- O passo de simulação deve ser de 1ms, ou seja, o tempo será incrementado de 1ms em 1ms.
+- A cada instante deve haver uma probabilidade (a definir) de chegar uma nova tarefa para ser executada.
+- A cada instante deve ser verificado se as tarefas já terminaram de executar (caso positivo, libera-se o PE para receber uma nova tarefa).
+- A cada instante o power de cada PE é enviado para o MaTeX.
+- O MaTeX deve calcular a temperatura e o FIT de cada PE (deixar a integração para fazer depois (vai ser apenas uma função a ser desenvolvida depois) use números aleatórios durante o desenvolvimento).
+- A cada instante deve 	ocorrer a verificação dos Scores que estão estáveis (vide for das linhas 1907 - 1970 da main).
+- O mapeamento, escolha de onde colocar cada tarefa, deve obedecer a heuristica (linhas 1850 - 1904 da main).
+
+Coisas interessantes para criar junto:
+- Um visualizador da evolução do treinamento, ou seja, alguma forma de ver que o treinamento está convergindo... talvez uma animação, com um gráfico de barras que vai mudando ao longo do tempo (tipo isso talvez: https://holypython.com/python-visualization-tutorial/creating-bar-chart-animations/ mas não se atenha a esse exemplo, fica bem livre pra pensar em algo diferente, pode ser sem animação... algo estático, como por exemplo três gráficos de linha (um para cada tipo de tarefa) com as 35 linhas em cada gráfico (uma para cada estado).
+
+
+TEMPERATURA E FIT:
+
+#define SYSTEM_SIZE         (DIM_X*DIM_Y)  
+#define THERMAL_NODES       (SYSTEM_SIZE*4)+12  // 4 thermal nodes for each PE plus 12 from the environment
+
+INICIALIZAÇÃO
+1º - Carregar as matrizes (estou te passando as matrizes para uma NoC 11x11)
+void load_matrices(double Binv[THERMAL_NODES][SYSTEM_SIZE], double Cexp[THERMAL_NODES][THERMAL_NODES]){
+    FILE *binvpointer;
+    binvpointer = fopen("peripheral/tea/binv.txt","r");
+    FILE *cexppointer;
+    cexppointer = fopen("peripheral/tea/cexp.txt","r");
+
+    char line[12000];
+    char *number;
+    int column, row;
+
+    for (row = 0; row < THERMAL_NODES; row++){
+        fgets(line, sizeof(line), binvpointer);
+        number = strtok(line, " ");
+        for(column = 0; column < SYSTEM_SIZE; column++){
+            Binv[row][column] = strtod(number, NULL);
+            //printf("%f ", Binv[row][column]); 
+            number = strtok(NULL, " ");      
+        }
+    }
+
+    for (row = 0; row < THERMAL_NODES; row++){
+        fgets(line, sizeof(line), cexppointer);
+        number = strtok(line, " ");
+        for(column = 0; column < THERMAL_NODES; column++){
+            Cexp[row][column] = strtod(number, NULL);
+            //printf("%f ", Cexp[row][column]); 
+            number = strtok(NULL, " ");      
+        }
+    }
+
+    fclose(binvpointer);
+    fclose(cexppointer);
+}
+-------------------------------------------------
+2º - Definir temperatura inicial
+    for(i=0;i<THERMAL_NODES;i++){
+        TempTraceEnd[i] = 313.15; // Kelvin
+    }
+-------------------------------------------------
+
+A CADA PASSO DE SIMULAÇÂO (1ms):
+1º Carregar os powers de cada PE em um VETOR:
+for (yi = 0; yi < DIM_Y; yi++)
+	for(xi = 0; xi < DIM_X; xi++){
+		power_trace[index] = power[yi][xi] // ATENÇÃO NA ORDEM, OBSERVA OS FORS VARIAM PRIMEIRO O X! E DEPOIS O Y!!!
+		index++;
+	}
+-------------------------------------------------
+2º Calcular a temperatura de STEADY STATE:
+void computeSteadyStateTemp(double Tsteady[THERMAL_NODES], double power_trace[SYSTEM_SIZE]){
+    int i, j;
+    double heatContributionPower;
+
+    for(i = 0; i < THERMAL_NODES; i++){
+
+        heatContributionPower = 0;
+        for(j = 0; j < SYSTEM_SIZE; j++){
+            heatContributionPower += Binv[i][j]*power_trace[j];
+        }
+        Tsteady[i] = heatContributionPower + 318.15; // soma com Temperatura Ambiente
+    }
+}
+-------------------------------------------------
+3º Calcular a diferença da temperatura no instante anterior...
+    for(k = 0; k < THERMAL_NODES; k++)
+        Tdifference[k] = TempTraceEnd[k] - Tsteady[k];
+-------------------------------------------------
+4º Calcular a temperatura atual
+    for(k = 0; k < THERMAL_NODES; k++){
+        sumExponentials = 0;
+        for(j = 0; j < THERMAL_NODES; j++){
+            sumExponentials += Cexp[k][j] * Tdifference[j];
+        }
+        TempTraceEnd[k] = Tsteady[k] + sumExponentials;
+    }
+-------------------------------------------------
+NESSE PONTO TU TEM A TEMPERATURA DE CADA UM DOS PEs NO VETOR "TempTraceEnd".
+SALVA ESSA INFORMAÇÂO EM UM ARQUIVO!
+-------------------------------------------------
+5º INICIALIZAÇÃO PARA CALCULAR O FIT:
+A função "allmodels" assim como a maioria das coisas está definida dentro do reliability.c que estou te enviando junto.
+Basta incluir o reliability.h no teu projeto.
+NA INICIALIZAÇÃO:
+    int unitc;
+	for (unitc = 0; unitc < TOTAL_STRUCTURES; unitc++){
+        sprintf(floorplan.units[unitc].name, "p%d", unitc);
+        floorplan.units[unitc].height = 0.000194; // mem 8Kb
+        floorplan.units[unitc].width = 0.000194; // mem 8Kb
+
+        init(&floorplan, unitc);  /* Initialize structures*/
+        fitinit(unitc);           /* Initialize FITS for each structure*/
+    }
+-------------------------------------------------
+5º Agora para calcular o FIT...
+    for (structures=0; structures < TOTAL_STRUCTURES; structures++){
+        /* Calculate FIT value by feeding in each structures temperature, activity
+            * factor, processor supply voltage, and processor frequency. */
+        allmodels(TempTraceEnd[structures], power_trace[structures], 1.0, 1.0, structures);
+	}
+Para acessar o valor do FIT:
+for(i = 0; i < DIM_Y*DIM_X; i++){
+	SystemFIT[i] = (int)rel_unit[i].ind_inst*100;
+}
+Para fazer a atribuição do FIT de cada um dos PEs (essas contas aí são para fazer uma média móvel dos últimos 32ms)
+    for (m = 0; m < DIM_X; m++){
+        for (n = 0; n < DIM_Y; n++){
+            avgFit = Tiles[n][m].fit;
+            totalFit = Tiles[n][m].fit << 5;
+            totalFit = totalFit - avgFit;
+            totalFit = totalFit + SystemFIT[i];
+            Tiles[n][m].fit = totalFit >> 5;
+            i++;
+        }
+    }
+No final para acessar o FIT de cada PE está aqui: Tiles[n][m].fit
+É esse FIT que deve ser usado no cálculo do DELTA-FIT que será usado na hora do reward do reinforcement learning.
